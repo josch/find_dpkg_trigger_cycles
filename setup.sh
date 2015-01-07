@@ -17,7 +17,6 @@ set -e
 ARCH="amd64"
 DIST="sid"
 MIRROR="http://http.debian.net/debian"
-#MIRROR="http://snapshot.debian.org/archive/debian/20141211T041251Z/"
 DIRECTORY="`pwd`/debian-$DIST-$ARCH"
 
 #FIXME: if the host has more than one arch enabled then those Packages files will be downloaded as well
@@ -59,48 +58,48 @@ APT_FILE_OPTS=$APT_FILE_OPTS" --sources-list $DIRECTORY/etc/apt/sources.list"
 
 apt-file $APT_FILE_OPTS update
 
-printf "" > interested-file
-printf "" > interested-explicit
-printf "" > activated-file
-printf "" > activated-explicit
+printf "" > $DIRECTORY/interested-file
+printf "" > $DIRECTORY/interested-explicit
+printf "" > $DIRECTORY/activated-file
+printf "" > $DIRECTORY/activated-explicit
 
 # find all binary packages with /triggers$
-curl "http://binarycontrol.debian.net/?q=&path=%2Ftriggers%24&format=pkglist" \
+curl --globoff "http://binarycontrol.debian.net/?q=&path=${DIST}%2F[^%2F]%2B%2Ftriggers%24&format=pkglist" \
 	| xargs apt-get $APT_OPTS --print-uris download \
 	| sed -ne "s/^'\([^']\+\)'\s\+\([^_]\+\)_.*/\2 \1/p" \
 	| sort \
 	| while read pkg url; do
 	echo "working on $pkg..." >&2
-	mkdir DEBIAN
+	tmpdir=`mktemp -d`
 	curl --retry 2 --location --silent "$url" \
 		| dpkg-deb --ctrl-tarfile /dev/stdin \
-		| tar -C "DEBIAN" --exclude=./md5sums -x
-	if [ ! -f DEBIAN/triggers ]; then
-		rm -r DEBIAN
+		| tar -C "$tmpdir" --exclude=./md5sums -x
+	if [ ! -f "$tmpdir/triggers" ]; then
+		rm -r "$tmpdir"
 		continue
 	fi
 	# find all triggers that are either interest or interest-await
 	# and which are file triggers (start with a slash)
-	egrep "^\s*interest(-await)?\s+/" DEBIAN/triggers | while read line; do
+	egrep "^\s*interest(-await)?\s+/" "$tmpdir/triggers" | while read line; do
 		echo "$pkg $line"
-	done >> interested-file
-	egrep "^\s*interest(-await)?\s+[^/]" DEBIAN/triggers | while read line; do
+	done >> $DIRECTORY/interested-file
+	egrep "^\s*interest(-await)?\s+[^/]" "$tmpdir/triggers" | while read line; do
 		echo "$pkg $line"
-	done >> interested-explicit
-	egrep "^\s*activate(-await)?\s+/" DEBIAN/triggers | while read line; do
+	done >> $DIRECTORY/interested-explicit
+	egrep "^\s*activate(-await)?\s+/" "$tmpdir/triggers" | while read line; do
 		echo "$pkg $line"
-	done >> activated-file
-	egrep "^\s*activate(-await)?\s+[^/]" DEBIAN/triggers | while read line; do
+	done >> $DIRECTORY/activated-file
+	egrep "^\s*activate(-await)?\s+[^/]" "$tmpdir/triggers" | while read line; do
 		echo "$pkg $line"
-	done >> activated-explicit
-	rm -r DEBIAN
+	done >> $DIRECTORY/activated-explicit
+	rm -r "$tmpdir"
 done
 
-printf "" > result-file
+printf "" > $DIRECTORY/result-file
 
 # go through those that are interested in a path and check them against the
 # files provided by its dependency closure
-cat interested-file | while read pkg ttype ipath; do
+cat $DIRECTORY/interested-file | while read pkg ttype ipath; do
 	echo "working on $pkg..." >&2
 	echo "getting dependency closure..." >&2
 	# go through all packages in the dependency closure and check if any
@@ -113,12 +112,12 @@ cat interested-file | while read pkg ttype ipath; do
 		| while read dep cpath; do
 			[ "$pkg" != "$dep" ] || continue
 			echo "$pkg $ipath $dep $cpath"
-		done >> result-file
+		done >> $DIRECTORY/result-file
 done
 
 # go through those that are interested in a path and check them against the
 # packages in the dependency closure which activate such a path
-cat interested-file | while read pkg ttype ipath; do
+cat $DIRECTORY/interested-file | while read pkg ttype ipath; do
 	echo "working on $pkg..." >&2
 	echo "getting dependency closure..." >&2
 	# go through all packages in the dependency closure and check if any
@@ -130,17 +129,17 @@ cat interested-file | while read pkg ttype ipath; do
 			[ "$pkg" != "$dep" ] || continue
 			# using the space as sed delimeter because ipath has slashes
 			# a space should work because neither package names nor paths have them
-			sed -ne "s ^$dep\s\+activate\(-await\)\?\s\+\($ipath.*\) \2 p" activated-file | while read cpath; do
+			sed -ne "s ^$dep\s\+activate\(-await\)\?\s\+\($ipath.*\) \2 p" $DIRECTORY/activated-file | while read cpath; do
 				echo "$pkg $ipath $dep $cpath"
 			done
-		done >> result-file
+		done >> $DIRECTORY/result-file
 done
 
-printf "" > result-explicit
+printf "" > $DIRECTORY/result-explicit
 
 # go through those that are interested in an explicit trigger and check them
 # against the packages in their dependency closure which activate it
-cat interested-explicit | while read pkg ttype iname; do
+cat $DIRECTORY/interested-explicit | while read pkg ttype iname; do
 	echo "working on $pkg..." >&2
 	echo "getting dependency closure..." >&2
 	# go through all packages in the dependency closure and check if any of
@@ -150,8 +149,61 @@ cat interested-explicit | while read pkg ttype iname; do
 		| awk '/^package:/ { print $2 }' \
 		| while read dep; do
 			[ "$pkg" != "$dep" ] || continue
-			if egrep "^$dep\s+activate(-await)?\s+$iname\s*$" activated-explicit > /dev/null; then
+			if egrep "^$dep\s+activate(-await)?\s+$iname\s*$" $DIRECTORY/activated-explicit > /dev/null; then
 				echo "$pkg $iname $dep"
 			fi
-		done >> result-explicit
+		done >> $DIRECTORY/result-explicit
 done
+
+echo "+----------------------------------------------------------+"
+echo "|                     result summary                       |"
+echo "+----------------------------------------------------------+"
+echo ""
+echo "number of found file based trigger cycles:"
+wc -l < $DIRECTORY/result-file
+if [ `wc -l < $DIRECTORY/result-file` -ne 0 ]; then
+	echo "Warning: found file based trigger cycles"
+	echo "number of packages creating file based trigger cycles:"
+	awk '{ print $1 }' $DIRECTORY/result-file | sort | uniq | wc -l
+	echo "unique packages creating file based trigger cycles:"
+	awk '{ print $1 }' $DIRECTORY/result-file | sort | uniq
+fi
+echo "number of found explicit trigger cycles:"
+wc -l < $DIRECTORY/result-explicit
+if [ `wc -l < $DIRECTORY/result-explicit` -ne 0 ]; then
+	echo "Warning: found explicit trigger cycles"
+	echo "number of packages creating explicit trigger cycles:"
+	awk '{ print $1 }' $DIRECTORY/result-explicit | sort | uniq | wc -l
+	echo "unique packages creating explicit trigger cycles:"
+	awk '{ print $1 }' $DIRECTORY/result-explicit | sort | uniq
+fi
+if [ `wc -l < $DIRECTORY/result-file` -ne 0 ]; then
+	echo ""
+	echo ""
+	echo "+----------------------------------------------------------+"
+	echo "|               file based trigger cycles                  |"
+	echo "+----------------------------------------------------------+"
+	echo ""
+	echo "# Associates binary packages with other binary packages they can form a file"
+	echo "# trigger cycle with. The first column is the binary package containing the file"
+	echo "# trigger, the second column is the file trigger, the third column is a binary"
+	echo "# package providing a path that triggers the binary package in the first column,"
+	echo "# the fourth column is the triggering path of provided by the binary package in"
+	echo "# the third column."
+	echo ""
+	cat $DIRECTORY/result-file
+fi
+if [ `wc -l < $DIRECTORY/result-explicit` -ne 0 ]; then
+	echo ""
+	echo ""
+	echo "+----------------------------------------------------------+"
+	echo "|               explicit trigger cycles                    |"
+	echo "+----------------------------------------------------------+"
+	echo ""
+	echo "# Associates binary packages with other binary packages they can form an explicit"
+	echo "# trigger cycle with. The first column is the binary package interested in the"
+	echo "# explicit trigger, the second column is the name of the explicit trigger, the"
+	echo "# third column is the binary package activating the trigger."
+	echo ""
+	cat $DIRECTORY/result-explicit
+fi
