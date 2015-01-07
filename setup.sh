@@ -15,48 +15,25 @@
 set -e
 
 ARCH="amd64"
-DIST="sid"
+SUITE="unstable"
 MIRROR="http://http.debian.net/debian"
-DIRECTORY="`pwd`/debian-$DIST-$ARCH"
-
-#FIXME: if the host has more than one arch enabled then those Packages files will be downloaded as well
-
-APT_OPTS="-y"
-APT_OPTS=$APT_OPTS" -o Apt::Architecture=$ARCH"
-APT_OPTS=$APT_OPTS" -o Dir::Etc::TrustedParts=$DIRECTORY/etc/apt/trusted.gpg.d"
-APT_OPTS=$APT_OPTS" -o Dir::Etc::Trusted=$DIRECTORY/etc/apt/trusted.gpg"
-APT_OPTS=$APT_OPTS" -o Dir=$DIRECTORY/"
-APT_OPTS=$APT_OPTS" -o Dir::Etc=$DIRECTORY/etc/apt/"
-APT_OPTS=$APT_OPTS" -o Dir::Etc::SourceList=$DIRECTORY/etc/apt/sources.list"
-APT_OPTS=$APT_OPTS" -o Dir::State=$DIRECTORY/var/lib/apt/"
-APT_OPTS=$APT_OPTS" -o Dir::State::Status=$DIRECTORY/var/lib/dpkg/status"
-APT_OPTS=$APT_OPTS" -o Dir::Cache=$DIRECTORY/var/cache/apt/"
-#APT_OPTS=$APT_OPTS" -o Acquire::Check-Valid-Until=false" # because we use snapshot
-
-mkdir -p $DIRECTORY
-mkdir -p $DIRECTORY/etc/apt/
-mkdir -p $DIRECTORY/etc/apt/trusted.gpg.d/
-mkdir -p $DIRECTORY/etc/apt/sources.list.d/
-mkdir -p $DIRECTORY/etc/apt/preferences.d/
-mkdir -p $DIRECTORY/var/lib/apt/
-mkdir -p $DIRECTORY/var/lib/apt/lists/partial/
-mkdir -p $DIRECTORY/var/lib/dpkg/
-mkdir -p $DIRECTORY/var/cache/apt/
-mkdir -p $DIRECTORY/var/cache/apt/apt-file/
-
-cp /etc/apt/trusted.gpg.d/* $DIRECTORY/etc/apt/trusted.gpg.d/
-
-touch $DIRECTORY/var/lib/dpkg/status
-
-echo deb $MIRROR $DIST main > $DIRECTORY/etc/apt/sources.list
-
-apt-get $APT_OPTS update
+DIRECTORY="`pwd`/debian-$SUITE-$ARCH"
+DISTNAME="$SUITE-$ARCH"
 
 APT_FILE_OPTS="--architecture $ARCH"
-APT_FILE_OPTS=$APT_FILE_OPTS" --cache $DIRECTORY/var/cache/apt/apt-file"
-APT_FILE_OPTS=$APT_FILE_OPTS" --sources-list $DIRECTORY/etc/apt/sources.list"
+APT_FILE_OPTS=$APT_FILE_OPTS" --cache $HOME/.chdist/$DISTNAME/var/cache/apt/apt-file"
+APT_FILE_OPTS=$APT_FILE_OPTS" --sources-list $HOME/.chdist/$DISTNAME/etc/apt/sources.list"
+
+# delete possibly existing dist
+rm -rf ~/.chdist/$DISTNAME;
+
+# the "[arch=amd64]" is a workaround until #774685 is fixed
+chdist --arch=$ARCH create $DISTNAME "[arch=amd64]" $MIRROR $SUITE main
+chdist --arch=$ARCH apt-get $DISTNAME update
 
 apt-file $APT_FILE_OPTS update
+
+mkdir -p $DIRECTORY
 
 printf "" > $DIRECTORY/interested-file
 printf "" > $DIRECTORY/interested-explicit
@@ -64,8 +41,8 @@ printf "" > $DIRECTORY/activated-file
 printf "" > $DIRECTORY/activated-explicit
 
 # find all binary packages with /triggers$
-curl --globoff "http://binarycontrol.debian.net/?q=&path=${DIST}%2F[^%2F]%2B%2Ftriggers%24&format=pkglist" \
-	| xargs apt-get $APT_OPTS --print-uris download \
+curl --globoff "http://binarycontrol.debian.net/?q=&path=${SUITE}%2F[^%2F]%2B%2Ftriggers%24&format=pkglist" \
+	| xargs chdist apt-get $DISTNAME --print-uris download \
 	| sed -ne "s/^'\([^']\+\)'\s\+\([^_]\+\)_.*/\2 \1/p" \
 	| sort \
 	| while read pkg url; do
@@ -105,7 +82,7 @@ cat $DIRECTORY/interested-file | while read pkg ttype ipath; do
 	# go through all packages in the dependency closure and check if any
 	# of the files they ship match one of the interested paths
 	dose-ceve -c $pkg -T cudf -t deb \
-		$DIRECTORY/var/lib/apt/lists/*_dists_${DIST}_main_binary-${ARCH}_Packages \
+		$HOME/.chdist/$DISTNAME/var/lib/apt/lists/*_dists_${SUITE}_main_binary-${ARCH}_Packages \
 		| awk '/^package:/ { print $2 }' \
 		| apt-file $APT_FILE_OPTS show -F --from-file - \
 		| sed -ne "s ^\([^:]\+\):\s\+\(${ipath}/.*\) \1\t\2 p" \
@@ -123,7 +100,7 @@ cat $DIRECTORY/interested-file | while read pkg ttype ipath; do
 	# go through all packages in the dependency closure and check if any
 	# of them activate a matching path
 	dose-ceve -c $pkg -T cudf -t deb \
-		$DIRECTORY/var/lib/apt/lists/*_dists_${DIST}_main_binary-${ARCH}_Packages \
+		$HOME/.chdist/$DISTNAME/var/lib/apt/lists/*_dists_${SUITE}_main_binary-${ARCH}_Packages \
 		| awk '/^package:/ { print $2 }' \
 		| while read dep; do
 			[ "$pkg" != "$dep" ] || continue
@@ -145,7 +122,7 @@ cat $DIRECTORY/interested-explicit | while read pkg ttype iname; do
 	# go through all packages in the dependency closure and check if any of
 	# them activate the trigger in which this package is interested
 	dose-ceve -c $pkg -T cudf -t deb \
-		$DIRECTORY/var/lib/apt/lists/*_dists_${DIST}_main_binary-${ARCH}_Packages \
+		$HOME/.chdist/$DISTNAME/var/lib/apt/lists/*_dists_${SUITE}_main_binary-${ARCH}_Packages \
 		| awk '/^package:/ { print $2 }' \
 		| while read dep; do
 			[ "$pkg" != "$dep" ] || continue
